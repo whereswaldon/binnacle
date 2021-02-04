@@ -48,6 +48,51 @@ type (
 	D = layout.Dimensions
 )
 
+func format(ed *widget.Editor) {
+	defer func() {
+		recover()
+	}()
+	start, end := ed.Selection()
+	forward := true
+	if end < start {
+		forward = false
+		start, end = end, start
+	}
+	text := ed.Text()
+	before := text[:start]
+	selected := text[start:end]
+	after := text[end:]
+
+	depth := 0
+	for _, slice := range []*string{&before, &selected, &after} {
+		var result strings.Builder
+		for i, line := range strings.Split(*slice, "\n") {
+			open := strings.Count(line, "(")
+			depth -= strings.Count(line, ")")
+			prefix := strings.Repeat("  ", depth)
+			depth += open
+			newLine := strings.TrimRight(strings.TrimLeft(line, " \t"), "\t\n")
+			if i > 0 {
+				result.Write([]byte("\n"))
+				result.Write([]byte(prefix))
+			}
+			result.Write([]byte(newLine))
+		}
+		*slice = result.String()
+	}
+
+	endStart := len(before)
+	endEnd := len(selected) + endStart
+	if !forward {
+		endStart, endEnd = endEnd, endStart
+	}
+	finalText := before + selected + after
+	if finalText != text {
+		ed.SetText(finalText)
+		ed.SetCaret(endStart, endEnd)
+	}
+}
+
 func loop(w *app.Window, client api.Client) error {
 	v1api := v1.NewAPI(client)
 	queryResults := make(chan []string)
@@ -77,6 +122,7 @@ func loop(w *app.Window, client api.Client) error {
 					}
 				}
 				if editorChanged {
+					format(&editor)
 					text := editor.Text()
 					log.Println("query", text)
 					go func() {
