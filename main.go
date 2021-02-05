@@ -67,11 +67,17 @@ func format(ed *widget.Editor) {
 	for _, slice := range []*string{&before, &selected, &after} {
 		var result strings.Builder
 		for i, line := range strings.Split(*slice, "\n") {
-			open := strings.Count(line, "(")
-			depth -= strings.Count(line, ")")
-			prefix := strings.Repeat("  ", depth)
-			depth += open
+			var leadingCloseParens int
 			newLine := strings.TrimRight(strings.TrimLeft(line, " \t"), "\t\n")
+			strings.TrimLeftFunc(newLine, func(r rune) bool {
+				if r == ')' {
+					leadingCloseParens++
+					return true
+				}
+				return false
+			})
+			prefix := strings.Repeat("  ", depth-leadingCloseParens)
+			depth += strings.Count(line, "(") - strings.Count(line, ")")
 			if i > 0 {
 				result.Write([]byte("\n"))
 				result.Write([]byte(prefix))
