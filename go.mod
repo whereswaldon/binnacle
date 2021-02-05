@@ -1,4 +1,4 @@
-module github.com/whereswaldon/c-eye
+module github.com/whereswaldon/binnacle
 
 go 1.15
 

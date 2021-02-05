@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"image/color"
 	"log"
 	"os"
 	"strings"
@@ -99,19 +100,29 @@ func format(ed *widget.Editor) {
 	}
 }
 
+type queryResult struct {
+	data     []string
+	warnings []string
+	error
+}
+
 func loop(w *app.Window, client api.Client) error {
 	v1api := v1.NewAPI(client)
-	queryResults := make(chan []string)
+	queryResults := make(chan queryResult)
 
 	th := material.NewTheme(gofont.Collection())
 	var (
-		ops      op.Ops
-		editor   widget.Editor
-		dataList layout.List
-		data     []string
-		inset    = layout.UniformInset(unit.Dp(4))
+		ops          op.Ops
+		editor       widget.Editor
+		dataList     layout.List
+		data         []string
+		warnings     []string
+		warningsList layout.List
+		errorText    string
+		inset        = layout.UniformInset(unit.Dp(4))
 	)
 	dataList.Axis = layout.Vertical
+	warningsList.Axis = layout.Vertical
 	for {
 		select {
 		case e := <-w.Events():
@@ -130,22 +141,19 @@ func loop(w *app.Window, client api.Client) error {
 				if editorChanged {
 					format(&editor)
 					text := editor.Text()
-					log.Println("query", text)
 					go func() {
 						ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 						defer cancel()
-						log.Println("starting query")
 						result, warnings, err := v1api.Query(ctx, text, time.Now())
-						if err != nil {
-							log.Println("failed querying", err)
-							return
+						var data []string
+						if result != nil {
+							data = strings.Split(result.String(), "\n")
 						}
-						log.Println("query results", result)
-						if len(warnings) > 0 {
-							log.Println("warnings:", warnings)
+						queryResults <- queryResult{
+							data:     data,
+							warnings: warnings,
+							error:    err,
 						}
-						queryResults <- strings.Split(result.String(), "\n")
-						log.Println("query results sent")
 					}()
 				}
 				layout.Flex{Axis: layout.Vertical}.Layout(gtx,
@@ -165,6 +173,30 @@ func loop(w *app.Window, client api.Client) error {
 							})
 						})
 					}),
+					layout.Rigid(func(gtx C) D {
+						if len(errorText) == 0 {
+							return D{}
+						}
+						return inset.Layout(gtx, func(gtx C) D {
+							label := material.Body1(th, errorText)
+							label.Font.Variant = "Mono"
+							label.Color = color.NRGBA{R: 0x6e, G: 0x0a, B: 0x1e, A: 255}
+							return label.Layout(gtx)
+						})
+					}),
+					layout.Rigid(func(gtx C) D {
+						if len(warnings) == 0 {
+							return D{}
+						}
+						return inset.Layout(gtx, func(gtx C) D {
+							return warningsList.Layout(gtx, len(warnings), func(gtx C, index int) D {
+								label := material.Body1(th, warnings[index])
+								label.Font.Variant = "Mono"
+								label.Color = color.NRGBA{R: 0xd4, G: 0xaf, B: 0x37, A: 255}
+								return label.Layout(gtx)
+							})
+						})
+					}),
 					layout.Flexed(1.0, func(gtx C) D {
 						return inset.Layout(gtx, func(gtx C) D {
 							return dataList.Layout(gtx, len(data), func(gtx C, index int) D {
@@ -177,7 +209,15 @@ func loop(w *app.Window, client api.Client) error {
 				)
 				e.Frame(gtx.Ops)
 			}
-		case data = <-queryResults:
+		case result := <-queryResults:
+			if result.error != nil {
+				errorText = result.Error()
+				warnings = nil
+			} else {
+				data = result.data
+				warnings = result.warnings
+				errorText = ""
+			}
 			w.Invalidate()
 		}
 	}
