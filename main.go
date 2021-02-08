@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,14 @@ import (
 	"github.com/prometheus/client_golang/api"
 	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/config"
+	"github.com/prometheus/common/model"
+
+	"gonum.org/v1/plot"
+	"gonum.org/v1/plot/palette/moreland"
+	"gonum.org/v1/plot/plotter"
+	"gonum.org/v1/plot/vg"
+	"gonum.org/v1/plot/vg/draw"
+	"gonum.org/v1/plot/vg/vggio"
 )
 
 func main() {
@@ -76,12 +85,8 @@ func (b *Backend) Query(text string) {
 	b.Unlock()
 	defer cancel()
 	result, warnings, err := b.API.Query(ctx, text, time.Now())
-	var data []string
-	if result != nil {
-		data = strings.Split(result.String(), "\n")
-	}
 	b.Updates <- queryResult{
-		data:     data,
+		data:     result,
 		warnings: warnings,
 		error:    err,
 	}
@@ -141,20 +146,123 @@ func format(ed *widget.Editor) {
 }
 
 type queryResult struct {
-	data     []string
+	data     model.Value
 	warnings []string
 	error
 }
 
+type Renderer struct {
+	model.Value
+
+	textDirty bool
+	text      []string
+}
+
+func (r *Renderer) SetData(m model.Value) {
+	r.Value = m
+	r.textDirty = true
+}
+
+func (r *Renderer) RenderText() []string {
+	if !r.textDirty {
+		return r.text
+	}
+	r.textDirty = false
+	r.text = strings.Split(r.Value.String(), "\n")
+	sort.SliceStable(r.text, func(i, j int) bool {
+		return strings.Compare(r.text[i], r.text[j]) < 0
+	})
+	return r.text
+}
+
+func (r *Renderer) RenderViz(gtx C) D {
+	switch value := r.Value.(type) {
+	case model.Vector:
+		return r.renderVector(gtx, value)
+	case *model.Scalar:
+		log.Println("scalar visualization is not yet supported")
+	case model.Matrix:
+		log.Println("matrix visualization is not yet supported")
+	case *model.String:
+		log.Println("string visualization is not yet supported")
+	default:
+		log.Println("no data to visualize")
+	}
+	return D{}
+}
+
+func min(in []*model.Sample) float64 {
+	m := in[0].Value
+	for i := range in {
+		if i == 0 {
+			continue
+		}
+		if in[i].Value < m {
+			m = in[i].Value
+		}
+	}
+	return float64(m)
+}
+
+func max(in []*model.Sample) float64 {
+	m := in[0].Value
+	for i := range in {
+		if i == 0 {
+			continue
+		}
+		if in[i].Value > m {
+			m = in[i].Value
+		}
+	}
+	return float64(m)
+}
+
+func (r *Renderer) renderVector(gtx C, data model.Vector) D {
+	if len(data) < 1 {
+		return D{}
+	}
+	sort.SliceStable(data, func(i, j int) bool {
+		return strings.Compare(data[i].Metric.String(), data[j].Metric.String()) < 0
+	})
+	p, err := plot.New()
+	if err != nil {
+		log.Printf("Failed constructing plot: %v", err)
+		return D{}
+	}
+	l := moreland.ExtendedBlackBody()
+	l.SetMin(min([]*model.Sample(data)))
+	l.SetMax(max([]*model.Sample(data)))
+	values := make([]plotter.Values, len(data))
+	labels := make([]string, len(data))
+	for i := range values {
+		labels[i] = data[i].Metric.String()
+		values[i] = make(plotter.Values, len(data))
+		values[i][i] = float64(data[i].Value)
+		chart, err := plotter.NewBarChart(values[i], 0.5*vg.Centimeter)
+		if err != nil {
+			log.Printf("Failed creating bar chart: %v", err)
+			return D{}
+		}
+		chart.Color, _ = l.At(values[i][i])
+		chart.Horizontal = true
+		p.Add(chart)
+	}
+	p.NominalY(labels...)
+	cnv := vggio.New(gtx, vg.Points(float64(gtx.Constraints.Max.X*3/4)), vg.Points(float64(gtx.Constraints.Max.Y*3/4)))
+	p.Draw(draw.New(cnv))
+	gtx.Ops = cnv.Paint()
+	return D{Size: gtx.Constraints.Max}
+}
+
 func loop(w *app.Window, client api.Client) error {
 	backEnd := NewBackend(client)
+	renderer := Renderer{}
 
 	th := material.NewTheme(gofont.Collection())
 	var (
 		ops          op.Ops
 		editor       widget.Editor
 		dataList     layout.List
-		data         []string
 		warnings     []string
 		warningsList layout.List
 		errorText    string
@@ -223,13 +331,23 @@ func loop(w *app.Window, client api.Client) error {
 						})
 					}),
 					layout.Flexed(1.0, func(gtx C) D {
-						return inset.Layout(gtx, func(gtx C) D {
-							return dataList.Layout(gtx, len(data), func(gtx C, index int) D {
-								label := material.Body1(th, data[index])
-								label.Font.Variant = "Mono"
-								return label.Layout(gtx)
-							})
-						})
+						return layout.Flex{}.Layout(gtx,
+							layout.Flexed(.5, func(gtx C) D {
+								return inset.Layout(gtx, func(gtx C) D {
+									data := renderer.RenderText()
+									return dataList.Layout(gtx, len(data), func(gtx C, index int) D {
+										label := material.Body1(th, data[index])
+										label.Font.Variant = "Mono"
+										return label.Layout(gtx)
+									})
+								})
+							}),
+							layout.Flexed(.5, func(gtx C) D {
+								return inset.Layout(gtx, func(gtx C) D {
+									return renderer.RenderViz(gtx)
+								})
+							}),
+						)
 					}),
 				)
 				e.Frame(gtx.Ops)
@@ -239,7 +357,7 @@ func loop(w *app.Window, client api.Client) error {
 				errorText = result.Error()
 				warnings = nil
 			} else {
-				data = result.data
+				renderer.SetData(result.data)
 				warnings = result.warnings
 				errorText = ""
 			}
