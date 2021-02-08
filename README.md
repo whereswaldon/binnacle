@@ -2,14 +2,17 @@
 
 Compose PromQL queries and get results fast!
 
+![screenshot](https://github.com/whereswaldon/binnacle/raw/main/img/binnacle.png)
+
 ## Features
 
 - query auto-formatting (wip)
 - rapid feedback errors and warnings about the query being composed
+- vector result visualization
 
 ## Planned features
 
-- result visualization
+- matrix/scalar result visualization
 - query macros for easier composition
 
 
