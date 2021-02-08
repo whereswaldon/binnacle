@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"gioui.org/app"
@@ -35,7 +36,7 @@ func main() {
 	}
 
 	go func() {
-		w := app.NewWindow(app.Title("c-eye"))
+		w := app.NewWindow(app.Title("Binnacle"))
 		if err := loop(w, client); err != nil {
 			log.Fatal(err)
 		}
@@ -44,15 +45,54 @@ func main() {
 	app.Main()
 }
 
+type Backend struct {
+	v1.API
+
+	// protects cancel func
+	sync.Mutex
+	cancel func()
+
+	Timeout time.Duration
+	Updates chan queryResult
+}
+
+func NewBackend(client api.Client) *Backend {
+	return &Backend{
+		API:     v1.NewAPI(client),
+		Updates: make(chan queryResult),
+		Timeout: time.Second * 10,
+	}
+}
+func (b *Backend) Query(text string) {
+	b.Lock()
+	// cancel any previously executing query
+	if b.cancel != nil {
+		b.cancel()
+	}
+	// create a new context
+	ctx, cancel := context.WithTimeout(context.Background(), b.Timeout)
+	// configure future queries to cancel this context
+	b.cancel = cancel
+	b.Unlock()
+	defer cancel()
+	result, warnings, err := b.API.Query(ctx, text, time.Now())
+	var data []string
+	if result != nil {
+		data = strings.Split(result.String(), "\n")
+	}
+	b.Updates <- queryResult{
+		data:     data,
+		warnings: warnings,
+		error:    err,
+	}
+}
+
 type (
 	C = layout.Context
 	D = layout.Dimensions
 )
 
 func format(ed *widget.Editor) {
-	defer func() {
-		recover()
-	}()
 	start, end := ed.Selection()
 	forward := true
 	if end < start {
@@ -107,8 +147,7 @@ type queryResult struct {
 }
 
 func loop(w *app.Window, client api.Client) error {
-	v1api := v1.NewAPI(client)
-	queryResults := make(chan queryResult)
+	backEnd := NewBackend(client)
 
 	th := material.NewTheme(gofont.Collection())
 	var (
@@ -140,21 +179,7 @@ func loop(w *app.Window, client api.Client) error {
 				}
 				if editorChanged {
 					format(&editor)
-					text := editor.Text()
-					go func() {
-						ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-						defer cancel()
-						result, warnings, err := v1api.Query(ctx, text, time.Now())
-						var data []string
-						if result != nil {
-							data = strings.Split(result.String(), "\n")
-						}
-						queryResults <- queryResult{
-							data:     data,
-							warnings: warnings,
-							error:    err,
-						}
-					}()
+					go backEnd.Query(editor.Text())
 				}
 				layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 					layout.Rigid(func(gtx C) D {
@@ -209,7 +234,7 @@ func loop(w *app.Window, client api.Client) error {
 				)
 				e.Frame(gtx.Ops)
 			}
-		case result := <-queryResults:
+		case result := <-backEnd.Updates:
 			if result.error != nil {
 				errorText = result.Error()
 				warnings = nil
