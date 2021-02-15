@@ -1,14 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
+	"fmt"
 	"image/color"
 	"log"
 	"os"
 	"sort"
 	"strings"
 	"sync"
+	"text/template"
 	"time"
 
 	"gioui.org/app"
@@ -72,18 +75,35 @@ func NewBackend(client api.Client) *Backend {
 		Timeout: time.Second * 10,
 	}
 }
+
 func (b *Backend) Query(text string) {
-	b.Lock()
-	// cancel any previously executing query
-	if b.cancel != nil {
-		b.cancel()
+	templ, err := template.New("query").Parse(text)
+	if err != nil {
+		b.Updates <- queryResult{
+			error: fmt.Errorf("query is not a valid go template: %w", err),
+		}
+		return
 	}
-	// create a new context
-	ctx, cancel := context.WithTimeout(context.Background(), b.Timeout)
-	// configure future queries to cancel this context
-	b.cancel = cancel
-	b.Unlock()
-	defer cancel()
+	var buf bytes.Buffer
+	err = templ.Execute(&buf, nil)
+	if err != nil {
+		b.Updates <- queryResult{
+			error: fmt.Errorf("could not execute query template: %w", err),
+		}
+		return
+	}
+	text = buf.String()
+	var ctx context.Context
+	func() {
+		b.Lock()
+		defer b.Unlock()
+		// cancel any previously executing query
+		if b.cancel != nil {
+			b.cancel()
+		}
+		// create a new context
+		ctx, b.cancel = context.WithTimeout(context.Background(), b.Timeout)
+	}()
 	result, warnings, err := b.API.Query(ctx, text, time.Now())
 	b.Updates <- queryResult{
 		data:     result,
