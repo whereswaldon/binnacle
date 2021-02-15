@@ -27,6 +27,7 @@ import (
 	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
+	"github.com/whereswaldon/binnacle/latest"
 
 	"gonum.org/v1/plot"
 	"gonum.org/v1/plot/palette/moreland"
@@ -173,14 +174,60 @@ type queryResult struct {
 
 type Renderer struct {
 	model.Value
+	*material.Theme
 
 	textDirty bool
 	text      []string
+
+	vizInit  bool
+	vizDirty bool
+	vizResult
+	vizResults chan vizResult
+	vizChan    *latest.Chan
+}
+
+func NewRenderer(th *material.Theme) *Renderer {
+	r := &Renderer{
+		Theme:      th,
+		vizResults: make(chan vizResult),
+		vizChan:    latest.NewChan(),
+	}
+	go func() {
+		for data := range r.vizChan.Raw() {
+			data := data.(vizData)
+			switch value := data.Value.(type) {
+			case model.Vector:
+				r.renderVector(data.Context, value)
+			case *model.Scalar:
+				log.Println("scalar visualization is not yet supported")
+			case model.Matrix:
+				log.Println("matrix visualization is not yet supported")
+			case *model.String:
+				log.Println("string visualization is not yet supported")
+			default:
+				log.Println("no data to visualize")
+			}
+		}
+	}()
+	return r
+}
+
+type vizResult struct {
+	ops         op.Ops
+	call        op.CallOp
+	constraints layout.Constraints
+	dims        layout.Dimensions
+}
+
+type vizData struct {
+	model.Value
+	layout.Context
 }
 
 func (r *Renderer) SetData(m model.Value) {
 	r.Value = m
 	r.textDirty = true
+	r.vizDirty = true
 }
 
 func (r *Renderer) RenderText() []string {
@@ -196,19 +243,30 @@ func (r *Renderer) RenderText() []string {
 }
 
 func (r *Renderer) RenderViz(gtx C) D {
-	switch value := r.Value.(type) {
-	case model.Vector:
-		return r.renderVector(gtx, value)
-	case *model.Scalar:
-		log.Println("scalar visualization is not yet supported")
-	case model.Matrix:
-		log.Println("matrix visualization is not yet supported")
-	case *model.String:
-		log.Println("string visualization is not yet supported")
+	select {
+	case result := <-r.vizResults:
+		r.vizResult = result
+		r.vizInit = true
 	default:
-		log.Println("no data to visualize")
 	}
-	return D{}
+	if gtx.Constraints != r.constraints {
+		r.vizDirty = true
+	}
+	if r.vizInit && !r.vizDirty {
+		r.call.Add(gtx.Ops)
+		return r.dims
+	}
+	if r.vizDirty {
+		r.vizDirty = false
+		r.vizChan.Push(vizData{
+			Value:   r.Value,
+			Context: gtx,
+		})
+	}
+	op.InvalidateOp{}.Add(gtx.Ops)
+	return layout.Center.Layout(gtx, func(gtx C) D {
+		return material.Loader(r.Theme).Layout(gtx)
+	})
 }
 
 func min(in []*model.Sample) float64 {
@@ -237,9 +295,9 @@ func max(in []*model.Sample) float64 {
 	return float64(m)
 }
 
-func (r *Renderer) renderVector(gtx C, data model.Vector) D {
+func (r *Renderer) renderVector(gtx C, data model.Vector) {
 	if len(data) < 1 {
-		return D{}
+		return
 	}
 	sort.SliceStable(data, func(i, j int) bool {
 		return strings.Compare(data[i].Metric.String(), data[j].Metric.String()) < 0
@@ -247,8 +305,9 @@ func (r *Renderer) renderVector(gtx C, data model.Vector) D {
 	p, err := plot.New()
 	if err != nil {
 		log.Printf("Failed constructing plot: %v", err)
-		return D{}
+		return
 	}
+	var result vizResult
 	l := moreland.ExtendedBlackBody()
 	l.SetMin(min([]*model.Sample(data)))
 	l.SetMax(max([]*model.Sample(data)))
@@ -261,24 +320,32 @@ func (r *Renderer) renderVector(gtx C, data model.Vector) D {
 		chart, err := plotter.NewBarChart(values[i], 0.5*vg.Centimeter)
 		if err != nil {
 			log.Printf("Failed creating bar chart: %v", err)
-			return D{}
+			return
 		}
 		chart.Color, _ = l.At(values[i][i])
 		chart.Horizontal = true
 		p.Add(chart)
 	}
 	p.NominalY(labels...)
+	oldOps := gtx.Ops
+	gtx.Ops = &result.ops
+
+	macro := op.Record(gtx.Ops)
 	cnv := vggio.New(gtx, vg.Points(float64(gtx.Constraints.Max.X*3/4)), vg.Points(float64(gtx.Constraints.Max.Y*3/4)))
 	p.Draw(draw.New(cnv))
 	gtx.Ops = cnv.Paint()
-	return D{Size: gtx.Constraints.Max}
+	call := macro.Stop()
+	result.constraints = gtx.Constraints
+	result.call = call
+	result.dims = D{Size: gtx.Constraints.Max}
+	gtx.Ops = oldOps
+	r.vizResults <- result
 }
 
 func loop(w *app.Window, client api.Client) error {
-	backEnd := NewBackend(client)
-	renderer := Renderer{}
-
 	th := material.NewTheme(gofont.Collection())
+	backEnd := NewBackend(client)
+	renderer := NewRenderer(th)
 	var (
 		ops          op.Ops
 		editor       widget.Editor
