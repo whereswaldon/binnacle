@@ -182,33 +182,17 @@ type Renderer struct {
 	vizInit  bool
 	vizDirty bool
 	vizResult
-	vizResults chan vizResult
-	vizChan    *latest.Chan
+	vizWorker latest.Worker
 }
 
 func NewRenderer(th *material.Theme) *Renderer {
 	r := &Renderer{
-		Theme:      th,
-		vizResults: make(chan vizResult),
-		vizChan:    latest.NewChan(),
+		Theme: th,
 	}
-	go func() {
-		for data := range r.vizChan.Raw() {
-			data := data.(vizData)
-			switch value := data.Value.(type) {
-			case model.Vector:
-				r.renderVector(data.Context, value)
-			case *model.Scalar:
-				log.Println("scalar visualization is not yet supported")
-			case model.Matrix:
-				log.Println("matrix visualization is not yet supported")
-			case *model.String:
-				log.Println("string visualization is not yet supported")
-			default:
-				log.Println("no data to visualize")
-			}
-		}
-	}()
+	render := func(input interface{}) interface{} {
+		return RenderVizData(input.(vizData))
+	}
+	r.vizWorker = latest.NewWorker(render)
 	return r
 }
 
@@ -244,8 +228,8 @@ func (r *Renderer) RenderText() []string {
 
 func (r *Renderer) RenderViz(gtx C) D {
 	select {
-	case result := <-r.vizResults:
-		r.vizResult = result
+	case result := <-r.vizWorker.Raw():
+		r.vizResult = result.(vizResult)
 		r.vizInit = true
 	default:
 	}
@@ -258,7 +242,7 @@ func (r *Renderer) RenderViz(gtx C) D {
 	}
 	if r.vizDirty {
 		r.vizDirty = false
-		r.vizChan.Push(vizData{
+		r.vizWorker.Push(vizData{
 			Value:   r.Value,
 			Context: gtx,
 		})
@@ -295,9 +279,25 @@ func max(in []*model.Sample) float64 {
 	return float64(m)
 }
 
-func (r *Renderer) renderVector(gtx C, data model.Vector) {
+func RenderVizData(data vizData) vizResult {
+	switch value := data.Value.(type) {
+	case model.Vector:
+		return RenderVector(data.Context, value)
+	case *model.Scalar:
+		log.Println("scalar visualization is not yet supported")
+	case model.Matrix:
+		log.Println("matrix visualization is not yet supported")
+	case *model.String:
+		log.Println("string visualization is not yet supported")
+	default:
+		log.Println("no data to visualize")
+	}
+	return vizResult{}
+}
+
+func RenderVector(gtx C, data model.Vector) vizResult {
 	if len(data) < 1 {
-		return
+		return vizResult{}
 	}
 	sort.SliceStable(data, func(i, j int) bool {
 		return strings.Compare(data[i].Metric.String(), data[j].Metric.String()) < 0
@@ -305,12 +305,14 @@ func (r *Renderer) renderVector(gtx C, data model.Vector) {
 	p, err := plot.New()
 	if err != nil {
 		log.Printf("Failed constructing plot: %v", err)
-		return
+		return vizResult{}
 	}
 	var result vizResult
-	l := moreland.ExtendedBlackBody()
-	l.SetMin(min([]*model.Sample(data)))
-	l.SetMax(max([]*model.Sample(data)))
+	l := moreland.BlackBody()
+	minData := min([]*model.Sample(data))
+	maxData := max([]*model.Sample(data))
+	l.SetMin(minData)
+	l.SetMax(maxData)
 	values := make([]plotter.Values, len(data))
 	labels := make([]string, len(data))
 	for i := range values {
@@ -320,7 +322,7 @@ func (r *Renderer) renderVector(gtx C, data model.Vector) {
 		chart, err := plotter.NewBarChart(values[i], 0.5*vg.Centimeter)
 		if err != nil {
 			log.Printf("Failed creating bar chart: %v", err)
-			return
+			return vizResult{}
 		}
 		chart.Color, _ = l.At(values[i][i])
 		chart.Horizontal = true
@@ -339,7 +341,7 @@ func (r *Renderer) renderVector(gtx C, data model.Vector) {
 	result.call = call
 	result.dims = D{Size: gtx.Constraints.Max}
 	gtx.Ops = oldOps
-	r.vizResults <- result
+	return result
 }
 
 func loop(w *app.Window, client api.Client) error {
