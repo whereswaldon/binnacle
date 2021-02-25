@@ -10,7 +10,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync"
 	"text/template"
 	"time"
 
@@ -61,52 +60,40 @@ func main() {
 type Backend struct {
 	v1.API
 
-	// protects cancel func
-	sync.Mutex
-	cancel func()
-
 	Timeout time.Duration
-	Updates chan queryResult
+	latest.Worker
 }
 
 func NewBackend(client api.Client) *Backend {
-	return &Backend{
+	b := &Backend{
 		API:     v1.NewAPI(client),
-		Updates: make(chan queryResult),
 		Timeout: time.Second * 10,
 	}
+	b.Worker = latest.NewWorker(func(in interface{}) interface{} {
+		return b.Query(in.(string))
+	})
+	return b
 }
 
-func (b *Backend) Query(text string) {
+func (b *Backend) Query(text string) queryResult {
 	templ, err := template.New("query").Parse(text)
 	if err != nil {
-		b.Updates <- queryResult{
+		return queryResult{
 			error: fmt.Errorf("query is not a valid go template: %w", err),
 		}
-		return
 	}
 	var buf bytes.Buffer
 	err = templ.Execute(&buf, nil)
 	if err != nil {
-		b.Updates <- queryResult{
+		return queryResult{
 			error: fmt.Errorf("could not execute query template: %w", err),
 		}
-		return
 	}
 	text = buf.String()
 	var ctx context.Context
-	func() {
-		b.Lock()
-		defer b.Unlock()
-		// cancel any previously executing query
-		if b.cancel != nil {
-			b.cancel()
-		}
-		// create a new context
-		ctx, b.cancel = context.WithTimeout(context.Background(), b.Timeout)
-	}()
+	ctx, _ = context.WithTimeout(context.Background(), b.Timeout)
 	result, warnings, err := b.API.Query(ctx, text, time.Now())
-	b.Updates <- queryResult{
+	return queryResult{
 		data:     result,
 		warnings: warnings,
 		error:    err,
@@ -376,7 +363,7 @@ func loop(w *app.Window, client api.Client) error {
 				}
 				if editorChanged {
 					format(&editor)
-					go backEnd.Query(editor.Text())
+					backEnd.Push(editor.Text())
 				}
 				layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 					layout.Rigid(func(gtx C) D {
@@ -441,7 +428,8 @@ func loop(w *app.Window, client api.Client) error {
 				)
 				e.Frame(gtx.Ops)
 			}
-		case result := <-backEnd.Updates:
+		case data := <-backEnd.Raw():
+			result := data.(queryResult)
 			if result.error != nil {
 				errorText = result.Error()
 				warnings = nil
