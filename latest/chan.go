@@ -53,3 +53,9 @@ func (n *Chan) Pull() interface{} {
 func (n *Chan) Raw() <-chan interface{} {
 	return n.in
 }
+
+// Close closes the underlying channel. After closing, you
+// should never Push data.
+func (n *Chan) Close() {
+	close(n.in)
+}
