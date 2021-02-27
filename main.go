@@ -289,11 +289,7 @@ func RenderVector(gtx C, data model.Vector) vizResult {
 	sort.SliceStable(data, func(i, j int) bool {
 		return strings.Compare(data[i].Metric.String(), data[j].Metric.String()) < 0
 	})
-	p, err := plot.New()
-	if err != nil {
-		log.Printf("Failed constructing plot: %v", err)
-		return vizResult{}
-	}
+	p := plot.New()
 	var result vizResult
 	l := moreland.BlackBody()
 	minData := min([]*model.Sample(data))
