@@ -29,6 +29,7 @@ func NewWorker(work func(in interface{}) interface{}) Worker {
 }
 
 func (w Worker) run() {
+	defer w.out.Close()
 	for input := range w.in.Raw() {
 		w.out.Push(w.work(input))
 	}
